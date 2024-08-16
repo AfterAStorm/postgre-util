@@ -83,7 +83,7 @@ db.custom('SELECT * FROM users WHERE name=%s', ['name'])
 # def insertOrUpdate(self, table: str, keys: list, values: list, columns: any=None, options: Options=None) -> Transaction[CustomQuery]
 # def insertOrUpdateDict(self, table: str, set: dict, columns: any=None, options: Options=None) -> Transaction[CustomQuery]
 #
-db.insertOrUpdate('users', {
+db.insertOrUpdateDict('users', {
     'name': 'foo',
     'role': 96,
 }, 'name') # docstrings explain the use
