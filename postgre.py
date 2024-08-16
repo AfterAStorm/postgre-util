@@ -1,11 +1,14 @@
 # afterastorm #
 # postgre wrapper w/ psycopg2
 
+# if you're curious, the docstring format is numpy's
+
 from typing import Generic, TypeVar
 import psycopg2 as pg
 
 __all__ = [ # what the import * fetches
     'Where',
+    'Options',
     'Database',
     'ALL',
     'ONE'
@@ -15,7 +18,7 @@ __all__ = [ # what the import * fetches
 class Where:
     def __init__(self, string: str=None): # string in-case you already make a statement, adds WHERE for you
         self.conditions = []
-        self.string = ' WHERE ' + string if string != None else ''
+        self.string = ' WHERE ' + string.strip().lstrip('WHERE') if string != None else '' # the lstrip assumes the WHERE is capital (if it even exists), if it isn't, then someone isn't following stylish syntax!
     
     # logic #
     # anything suffixed with "l" is due to python... cant name a function "and" or "or" or "in" >:(
@@ -91,7 +94,7 @@ class Where:
     def inl(self, what: str, range: tuple):
         '''IN
         '''
-        self.conditions.append((' IN ', what, range))
+        self.conditions.append((' IN ', what, tuple(range))) # cast to tuple to make sure it's not an iterator
         #self.conditions.append(('(',))
         #self.conditions.append((','.join(range),))
         #self.conditions.append((')',))
@@ -125,14 +128,106 @@ class Where:
         vals = [x for x in map(lambda v: v[2] if len(v) == 3 else None, self.conditions) if x is not None]
         return ' WHERE ' + cursor.mogrify(formatting, vals).decode()#[cond for tup in self.conditions for cond in tup[1:]]
 
+def _parseWhere(clause: any):
+    if isinstance(clause, Where):
+        return clause
+    elif isinstance(clause, str):
+        return Where(clause)
+    elif clause == None:
+        return Where()
+    raise TypeError('Where clause must be Where, str, or None')
+
+def _parseOptions(options: any):
+    if isinstance(options, Options):
+        return options
+    elif isinstance(options, str):
+        return Options(options)
+    elif options == None:
+        return Options()
+    raise TypeError('Options must be Options, str, or None')
+
+def _parseColumns(columnOrColumns: str, allowAll=True):
+    if columnOrColumns == ALL or columnOrColumns == '*':
+        if not allowAll:
+            raise ValueError('Cannot use all columns (aka "*")')
+        return '*'
+    elif isinstance(columnOrColumns, list) or isinstance(columnOrColumns, tuple):
+        return ','.join(columnOrColumns)
+    elif isinstance(columnOrColumns, str):
+        return columnOrColumns
+    raise TypeError('Column(s) must be either a str, "*", list of str, or tuple of str')
+
+class Options:
+    ORDERING = { # higher values are placed more rightwards, so LIMIT will alawys be to the left of RETURNING (LIMIT + RETURNING is never possible anyway!)
+        'RETURNING': 30,
+        'LIMIT': 20,
+        'ORDER BY': 10,
+    }
+    
+    def __init__(self, string: str=None): # string in-case you already make a statement
+        self.options = []
+        self.string = ' ' + string.strip() if string != None else ''
+    
+    def limit(self, amount: int):
+        '''LIMIT X
+
+        Parameters
+        ----------
+        amount : int
+            Maximum # of rows
+        '''
+        self.options.append((Options.ORDERING['LIMIT'], f'LIMIT {amount}'))
+        return self
+    
+    def orderby(self, columnOrColumns: any):
+        '''ORDER BY column(s)
+
+        Parameters
+        ----------
+        columnOrColumns : str
+            Column as a str (or optionally, a list of columns as a list, tuple, or string split with commas) (* not allowed)
+        '''
+        self.options.append((Options.ORDERING['ORDER BY'], f'ORDER BY {_parseColumns(columnOrColumns, allowAll=False)}')) # i'm not sure why you can use multiple columns ;-;
+        return self
+    
+    def returning(self, columnOrColumns: any):
+        '''RETURNING column(s)
+
+        Parameters
+        ----------
+        columnOrColumns : str
+            Column as a str (or optionally, a list of columns as a list, tuple, or string split with commas)
+        '''
+        self.options.append((Options.ORDERING['RETURNING'], f'RETURNING {_parseColumns(columnOrColumns)}'))
+        return self
+    
+    def custom(self, priority: int, statement: str):
+        '''Define a custom option
+
+        Parameters
+        ----------
+        priority : int
+            The priority, use ```Options.ORDERING``` as reference (higher numbers are more rightwards)
+        statement : str
+            The actual statement, ex: "RETURNING id"
+        '''
+        self.options.append((priority, statement))
+        return self
+    
+    def build(self, cursor: pg.extensions.cursor) -> str: # only time im making a one liner not one line, it's "easier" to "read" (decipher ;-;)
+        if len(self.options) == 0:
+            return self.string
+        self.options.sort(key=lambda x: x[0]) # sort in ascending order, so ORDER BY x LIMIT y
+        return ' ' + ' '.join(map(lambda x: x[1], self.options))
+
 class InsertQuery:
-    def __init__(self, table: str, keys: list, returning: any) -> None:
+    def __init__(self, table: str, keys: list, options: Options) -> None:
         self.query = 'INSERT INTO %s (%s) VALUES ' % (table, ','.join(keys))
         self.template = '(%s)' % (','.join(['%s' for _ in range(len(keys))]))
         self.values = []
         self.total = 0
         self.length = len(keys)
-        self.suffix = ' RETURNING %s' % (','.join(self.returning) if isinstance(returning, list) else returning) if returning != None else ''
+        self.options = options
     
     def add(self, values: list):
         if len(values) != self.length: # validation
@@ -141,35 +236,47 @@ class InsertQuery:
         self.total += 1
     
     def build(self, cursor):
-        return self.query + ','.join([self.template for _ in range(self.total)]) + self.suffix, self.values
+        return self.query + ','.join([self.template for _ in range(self.total)]) + self.options.build(cursor), self.values
 
 class UpdateQuery:
-    def __init__(self, table: str, where: Where, returning: any) -> None:
+    def __init__(self, table: str, where: Where, options: Options) -> None:
         self.query = 'UPDATE %s SET ' % table
         self.template = '%s='
         self.values = []
         self.total = 0
-        self.where = where if where != None else Where()
-        self.suffix = ' RETURNING %s' % (','.join(self.returning) if isinstance(returning, list) else returning) if returning != None else ''
+        self.where = where
+        self.options = options
     
     def add(self, key: any, value: any):
         self.values.append((key, value))
         self.total += 1
     
     def build(self, cursor):
-        return self.query + ','.join([(self.template % (self.values[i][0])) + '%s' for i in range(self.total)]) + self.where.build(cursor) + self.suffix, list(map(lambda v : v[1], self.values))
+        return self.query + ','.join([(self.template % (self.values[i][0])) + '%s' for i in range(self.total)]) + self.where.build(cursor) + self.options.build(cursor), list(map(lambda v : v[1], self.values))
 
 class DeleteQuery:
-    def __init__(self, table: str, where: Where, returning: any) -> None:
+    def __init__(self, table: str, where: Where, options: Options) -> None:
         self.query = 'DELETE FROM %s' % table
-        self.where = where if where != None else Where()
-        self.suffix = ' RETURNING %s' % (','.join(self.returning) if isinstance(returning, list) else returning) if returning != None else ''
+        self.where = where
+        self.options = options
     
     def add(self, *args, **kwargs):
         raise NotImplementedError('Delete query doesn\'t require any additions!')
     
     def build(self, cursor):
-        return self.query + self.where.build(cursor) + self.suffix, None
+        return self.query + self.where.build(cursor) + self.options.build(cursor), None
+
+class SelectQuery:
+    def __init__(self, table: str, what: str, where: Where, options: Options) -> None:
+        self.query = 'SELECT %s FROM %s' % (what, table)
+        self.where = where
+        self.options = options
+    
+    def add(self, *args, **kwargs):
+        raise NotImplementedError('Select query doesn\'t require any additions!')
+    
+    def build(self, cursor):
+        return self.query + self.where.build(cursor) + self.options.build(cursor), None
 
 class CustomQuery:
     def __init__(self, query: str, values: list):
@@ -202,14 +309,12 @@ class Transaction(Generic[Query]):
     def add(self, *args, **kwargs):
         '''Add to the query
         '''
-        print('query:', self.query)
         self.query.add(*args, **kwargs)
     
     def execute(self):
         '''Execute the query
         '''
         execute = self.query.build(self.cursor)
-        print('executing', execute)
         self.cursor.execute(*execute)
         if self.autocommit:
             self.commit()
@@ -226,10 +331,61 @@ class Transaction(Generic[Query]):
             Group by column, by default None
         index : bool, optional
             Return dictionaries instead, where keys are column names, by default True
+        
+        Notes
+        --------
+        Assuming quotes are in the right place and using this table:
+        
+        ```
+        id | name | desc
+        1  | a    | object a
+        2  | b    | object b
+        ```
+        
+        Group By returns a dictionary where the keys are the column specified, ex:
+        
+        group_by id (by default, it's just a list as shown below)
+        ```
+        {
+            1: {
+                name: a
+                desc: object a
+            }
+            2: {
+                name: b
+                desc: object b
+            }
+        }
+        ```
+        
+        Index returns the objects as dictionaries where the keys are column names, ex:
+        (same table above)
+        
+        index False
+        ```
+        [
+            [1, a, object a]
+            [2, b, object b]
+        ]
+        ```
+        
+        index True (default)
+        ```
+        [
+            {
+                id: 1,
+                name: a,
+                desc: object a
+            },
+            ...
+        ]
+        ```
         '''
         count = int(count) # make sure it's an int
         if count <= -1:
             rows = self.cursor.fetchall()
+        elif count == 0: # why not support this? :p
+            return {} if group_by != None else []
         elif count == 1:
             rows = [self.cursor.fetchone()]
         else:
@@ -262,7 +418,7 @@ class Transaction(Generic[Query]):
         self.close()
 
 class Database:
-    def __init__(self, dbname: str=None, user: str=None, password: str=None, host: str='localhost', port: int=5432, autoCommit: bool=True):
+    def __init__(self, dbname: str=None, user: str=None, password: str=None, host: str='localhost', schema: str=None, port: int=5432, autoCommit: bool=True):
         '''Create a database
 
         Parameters
@@ -275,6 +431,8 @@ class Database:
             The password, by default None
         host : str, optional
             The host, by default 'localhost'
+        schema : str, optional
+            The schema, prefixes table names with "schema."
         port : int, optional
             The port, by default 5432
         autoCommit : bool, optional
@@ -287,6 +445,7 @@ class Database:
             'host': host,
             'port': port,
         }
+        self.schema = None
         self.connection: pg.extensions.connection = None
         self.autoCommit = autoCommit
         self.connect()
@@ -296,11 +455,24 @@ class Database:
         '''
         self.connection = pg.connect(**self.credentials)
     
+    def commit(self):
+        '''Commit the database changes
+        '''
+        self.commit()
+    
+    def _parseTable(self, table: str):
+        if not isinstance(table, str):
+            raise TypeError('Table must be a str')
+        if self.schema != None:
+            return self.schema + '.' + table
+        else:
+            return table
+    
     def __exit__(self, exception_type, exception_value, exception_traceback):
         if not self.connection.closed:
             self.connection.close()
     
-    def insert(self, table: str, keys: list, returning: any=None) -> Transaction[InsertQuery]:
+    def insert(self, table: str, keys: list, options: Options=None) -> Transaction[InsertQuery]:
         '''Insert >=1 rows
 
         Parameters
@@ -309,18 +481,18 @@ class Database:
             The table being inserted into
         keys : list
             The columns being defined
-        returning : any, optional
-            The columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[InsertQuery]
             The transaction
         '''
-        transaction = Transaction(self.connection.cursor(), InsertQuery(table, keys, returning), self.autoCommit)
+        transaction = Transaction(self.connection.cursor(), InsertQuery(self._parseTable(table), keys, _parseOptions(options)), self.autoCommit)
         return transaction
     
-    def insertOne(self, table: str, keys: list, values: list, returning: any=None) -> Transaction[InsertQuery]:
+    def insertOne(self, table: str, keys: list, values: list, options: Options=None) -> Transaction[InsertQuery]:
         '''Insert 1 row
 
         Parameters
@@ -331,19 +503,19 @@ class Database:
             The columns being defined
         values : list
             The column values
-        returning : any, optional
-            THe columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[InsertQuery]
             The transaction
         '''
-        with self.insert(table, keys, returning) as t:
+        with self.insert(table, keys, _parseOptions(options)) as t:
             t.add(values)
         return t
     
-    def insertDict(self, table: str, set: dict, returning: any=None) -> Transaction[InsertQuery]:
+    def insertDict(self, table: str, set: dict, options: Options=None) -> Transaction[InsertQuery]:
         '''Insert 1 row
 
         Parameters
@@ -352,19 +524,19 @@ class Database:
             The table being inserted into
         set : dict
             The {'column': value} dictionary
-        returning : any, optional
-            The columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[InsertQuery]
             The transaction
         '''
-        with self.insert(table, list(set.keys()), returning) as t:
+        with self.insert(table, list(set.keys()), _parseOptions(options)) as t:
             t.add(list(set.values()))
         return t
     
-    def update(self, table: str, where: Where, returning: any=None) -> Transaction[UpdateQuery]:
+    def update(self, table: str, where: Where=None, options: Options=None) -> Transaction[UpdateQuery]:
         '''Update rows
 
         Parameters
@@ -373,17 +545,17 @@ class Database:
             The table being updated
         where : Where
             The where clause
-        returning : any, optional
-            The columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[UpdateQuery]
             The transaction
         '''
-        return Transaction(self.connection.cursor(), UpdateQuery(table, where, returning), self.autoCommit)
+        return Transaction(self.connection.cursor(), UpdateQuery(self._parseTable(table), _parseWhere(where), _parseOptions(options)), self.autoCommit)
     
-    def updateDict(self, table: str, set: dict, where: Where, returning: any=None) -> Transaction[UpdateQuery]:
+    def updateDict(self, table: str, set: dict, where: Where=None, options: Options=None) -> Transaction[UpdateQuery]:
         '''Update rows
 
         Parameters
@@ -394,20 +566,20 @@ class Database:
             The {'column': value} dictionary
         where : Where
             The where clause
-        returning : any, optional
-            The columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[UpdateQuery]
             The transaction
         '''
-        with self.update(table, where, returning) as t:
+        with self.update(table, _parseWhere(where), _parseOptions(options)) as t:
             for k, v in set.items():
                 t.add(k, v)
         return t
     
-    def delete(self, table: str, where: Where, returning: any=None) -> Transaction[DeleteQuery]:
+    def delete(self, table: str, where: Where=None, options: Options=None) -> Transaction[DeleteQuery]:
         '''Delete rows
 
         Parameters
@@ -416,17 +588,42 @@ class Database:
             The table being deleted from
         where : Where
             The where clause
-        returning : any, optional
-            The columns being returned, by default None
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
 
         Returns
         -------
         Transaction[DeleteQuery]
             The transaction, executed immediately
         '''
-        t = Transaction(self.connection.cursor(), DeleteQuery(table, where, returning), self.autoCommit)
+        t = Transaction(self.connection.cursor(), DeleteQuery(self._parseTable(table), _parseWhere(where), _parseOptions(options)), self.autoCommit)
         with t:
             pass # to be consistent, technically we could just call .execute() or whatever
+        return t
+    
+    def select(self, table: str, columns: str, where: Where=None, options: Options=None) -> Transaction[SelectQuery]:
+        '''Select rows
+
+        Parameters
+        ----------
+        table : str
+            The table being selected
+        columns : str
+            What columns are we selecting,
+            columns as a str (or optionally, a list of columns as a list, tuple, or string split with commas)
+        where : Where
+            The where clause
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
+
+        Returns
+        -------
+        Transaction[SelectQuery]
+            The transaction, executed immediately
+        '''
+        t = Transaction(self.connection.cursor(), SelectQuery(self._parseTable(table), columns, _parseWhere(where), _parseOptions(options)), self.autoCommit)
+        with t:
+            pass
         return t
     
     def custom(self, sql: str, values: list) -> Transaction[CustomQuery]:
@@ -448,3 +645,66 @@ class Database:
         with t:
             pass # same as above
         return t
+    
+    # extras / utilities #
+    
+    def insertOrUpdate(self, table: str, keys: list, values: list, columns: any=None, options: Options=None) -> Transaction[CustomQuery]:
+        '''Insert or Update one row
+
+        Parameters
+        ----------
+        table : str
+            The table being inserted into
+        keys : list
+            The columns being defined
+        values : list
+            The column values
+        columns : str
+            Columns as a str that can conflict (or optionally, a list of columns as a list, tuple, or string split with commas) (* not allowed)
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
+
+        Returns
+        -------
+        Transaction[CustomQuery]
+            The transaction, executed immediately
+        '''
+        cursor = self.connection.cursor()
+        table = self._parseTable(table)
+        options = _parseOptions(options) # parse all variables since they are used multiple times!
+        columns = _parseColumns(columns, allowAll=False)
+        insert = InsertQuery(table, keys, options) # options are parsed themselves by the queries, very convienent!
+        insert.add(values) # <-- will handle len(keys) != len(values) for us :D
+        update = UpdateQuery('', Where(), options)
+        for i in range(len(keys)):
+            update.add(keys[i], values[i])
+        insertQuery, insertValues = insert.build(cursor) # build both statements to compile them later
+        updateQuery, updateValues = update.build(cursor)
+        # optionsQuery = options.build(cursor) # jk, queries do it for us! ~~ has left padding space, that's why the below format string looks weird :D
+        # you can't do RETURNING with this... isn't SQL just so fun? (╯°□°）╯︵ ┻━┻
+        # well you can... just look at stackoverflow and use a .custom() statement if you care so much
+        
+        t = Transaction(cursor, CustomQuery(f'{insertQuery} ON CONFLICT ({columns}) DO {updateQuery}', [*insertValues, *updateValues]), self.autoCommit)
+        with t:
+            pass
+        return t
+        
+    
+    def insertOrUpdateDict(self, table: str, set: dict, options: Options=None) -> Transaction[CustomQuery]:
+        '''Insert or Update one row
+
+        Parameters
+        ----------
+        table : str
+            The table being inserted into or updated
+        set : dict
+            The {'column': value} dictionary
+        options : Options, optional
+            Special options appended at the end of a statement, such as RETURNING or LIMIT
+
+        Returns
+        -------
+        Transaction[CustomQuery]
+            The transaction
+        '''
+        return self.insertOrUpdate(table, list(set.keys()), list(set.values()), options)
