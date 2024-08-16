@@ -648,7 +648,7 @@ class Database:
     
     # extras / utilities #
     
-    def insertOrUpdate(self, table: str, keys: list, values: list, columns: any=None, options: Options=None) -> Transaction[CustomQuery]:
+    def insertOrUpdate(self, table: str, keys: list, values: list, columns: any, options: Options=None) -> Transaction[CustomQuery]:
         '''Insert or Update one row
 
         Parameters
@@ -690,7 +690,7 @@ class Database:
         return t
         
     
-    def insertOrUpdateDict(self, table: str, set: dict, options: Options=None) -> Transaction[CustomQuery]:
+    def insertOrUpdateDict(self, table: str, set: dict, columns: any, options: Options=None) -> Transaction[CustomQuery]:
         '''Insert or Update one row
 
         Parameters
@@ -699,6 +699,8 @@ class Database:
             The table being inserted into or updated
         set : dict
             The {'column': value} dictionary
+        columns : str
+            Columns as a str that can conflict (or optionally, a list of columns as a list, tuple, or string split with commas) (* not allowed)
         options : Options, optional
             Special options appended at the end of a statement, such as RETURNING or LIMIT
 
@@ -707,4 +709,4 @@ class Database:
         Transaction[CustomQuery]
             The transaction
         '''
-        return self.insertOrUpdate(table, list(set.keys()), list(set.values()), options)
+        return self.insertOrUpdate(table, list(set.keys()), list(set.values()), columns, options)

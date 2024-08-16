@@ -21,7 +21,7 @@ db = Database(
 
 with db.insert('posts', ['title', 'contents', 'poster'], Options().returning('id')) as insert:
     insert.add(('title', 'contents', 621))
-INSERTS = insert.fetch(-1)
+INSERTS = insert.fetch(1)
 print('INSERT INTO:', INSERTS)
 # if autoCommit wasn't True, you'd have to do
 # trans.commit() -- something to note:
