@@ -391,19 +391,18 @@ class Transaction(Generic[Query]):
         else:
             rows = self.cursor.fetchmany(count)
         # ((a, b, c), (a, b, c))
+        columns = self.cursor.description
         if group_by != None: # group by column, so {'name': {...}, 'name2': [...]}
             out = {}
-            columns = self.cursor.description
             if isinstance(group_by, str):
-                index = next(i for i, v in enumerate(columns) if v.name == group_by)
+                col_index = next(i for i, v in enumerate(columns) if v.name == group_by)
             else:
-                index = int(index)
+                col_index = int(index)
             for row in rows:
-                out[row[index]] = dict([(columns[index].name, row[index]) for index in range(len(row))]) if index else row
+                out[row[col_index]] = dict([(columns[index].name, row[index]) for index in range(len(row))]) if index else row
             return out
         else: # just return a list, so [{...}, [...]]
             if index:
-                columns = self.cursor.description
                 rows = [dict([(columns[index].name, row[index]) for index in range(len(row))]) for row in rows]
             return rows
     
@@ -449,6 +448,9 @@ class Database:
         self.connection: pg.extensions.connection = None
         self.autoCommit = autoCommit
         self.connect()
+
+    def cursor(self):
+        return self.connection.cursor()
 
     def connect(self):
         '''Connect to the database with credentials given in the constructor
@@ -626,7 +628,7 @@ class Database:
             pass
         return t
     
-    def custom(self, sql: str, values: list) -> Transaction[CustomQuery]:
+    def custom(self, sql: str, values: list=None) -> Transaction[CustomQuery]:
         '''Execute a custom SQL statement
 
         Parameters
@@ -688,7 +690,6 @@ class Database:
         with t:
             pass
         return t
-        
     
     def insertOrUpdateDict(self, table: str, set: dict, columns: any, options: Options=None) -> Transaction[CustomQuery]:
         '''Insert or Update one row
